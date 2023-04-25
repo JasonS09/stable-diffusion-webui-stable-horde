@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from modules import scripts, processing, shared, images, devices, ui, lowvram
+import importlib
 import gradio
 import requests
 import time
@@ -167,13 +168,13 @@ class Main(SettingsManager, scripts.Script):
 
         post_processing = []
 
-        if post_processing_1 != "None":
+        if post_processing_1 and post_processing_1 != "None":
             post_processing.append(post_processing_1.split("(")[0].rstrip())
 
-            if post_processing_2 != "None":
+            if post_processing_2 and post_processing_2 != "None":
                 post_processing.append(post_processing_2.split("(")[0].rstrip())
 
-                if post_processing_3 != "None":
+                if post_processing_3 and post_processing_3 != "None":
                     post_processing.append(post_processing_3.split("(")[0].rstrip())
 
         return self.process_images(p, model, nsfw, shared_laion, int(seed_variation), post_processing)
@@ -379,7 +380,49 @@ class Main(SettingsManager, scripts.Script):
             assert model not in {"Stable Diffusion 2 Depth", "pix2pix"} or self.is_img2img and p.image_mask is None, "Model {} can only be used for img2img".format(model)
         except AssertionError as e:
             raise StableHordeGenerateError(str(e))
-
+        
+        def get_controlnet_parameters():
+            controlnet_installed =  importlib.util.find_spec('extensions.sd-webui-controlnet.scripts.external_code')
+            if controlnet_installed:
+                external_code = importlib.import_module('extensions.sd-webui-controlnet.scripts.external_code', 'external_code')
+                controlnet = next((unit for unit in external_code.get_all_units_in_processing(p) if unit.enabled), "")
+                if controlnet:
+                    return (get_control_type(controlnet), image_from_path(controlnet.image))
+                else:
+                    return ("", None)
+            else:
+                return ("", None)
+                
+        def get_control_type(unit):
+            if "canny" in unit.model:
+                return "canny"
+            if "depth" in unit.model:
+                return "depth"
+            if "hed" in unit.model:
+                return "hed"
+            if "normal" in unit.model:
+                return "normal"
+            if "openpose" in unit.model:
+                return "openpose"
+            if "seg" in unit.model:
+                return "seg"
+            if "fake_scribble" in unit.module:
+                return "fakescribbles"
+            if "scribble" in unit.model:
+                return "scribble"
+            if "mlsd" in unit.module:
+                return "hough"
+            return ""
+        
+        def image_from_path(image):
+            if isinstance(image['image'], str):
+                buffer = io.BytesIO()
+                if os.path.exists(image['image']):
+                    return PIL.Image.open(image['image'])
+            return None
+            
+        control_type, control_image = get_controlnet_parameters() if not self.is_img2img else ("", None)
+        
         payload = {
             "prompt": "{} ### {}".format(prompt, negative_prompt) if len(negative_prompt) > 0 else prompt,
             "params": {
@@ -388,7 +431,9 @@ class Main(SettingsManager, scripts.Script):
                 "height": p.height,
                 "width": p.width,
                 "steps": p.steps,
-                "n": p.batch_size
+                "n": p.batch_size,
+                "control_type": control_type,
+                "image_is_control": True if control_image else False
             },
             "r2": False
         }
@@ -450,6 +495,11 @@ class Main(SettingsManager, scripts.Script):
 
         if not self.is_img2img and self.api_key != "0000000000" and shared_laion:
             payload["shared"] = True
+
+        if not self.is_img2img and control_image:
+            buffer = io.BytesIO()
+            control_image.save(buffer, format="WEBP")
+            payload["source_image"] = base64.b64encode(buffer.getvalue()).decode()
 
         if shared.state.skipped or shared.state.interrupted:
             return (None, None)
